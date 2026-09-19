@@ -1,0 +1,296 @@
+//@version=6
+//==============================================================================
+// SMC Order Flow Intelligence Engine - Phase 1
+//==============================================================================
+// Purpose: A modular market-context foundation for Smart Money Concepts analysis.
+// Direct TradingView data: OHLCV, time, confirmed pivot values, and VWAP inputs.
+// Derived data: ATR, relative volume, VWAP bands, pivots, structure labels, and
+// premium/discount. Heuristic data: estimated buy/sell volume, delta, and CVD.
+// Pine does not expose a complete historical DOM or exchange aggressor feed;
+// therefore this script never presents estimated order flow as exact bid/ask data.
+//
+// Non-repainting policy: pivots are only used after right-side confirmation.
+// This necessarily delays swing labels by the configured pivot length. No
+// lookahead requests or future bars are used. Realtime values can still change
+// until the current bar closes; alerts should be configured Once Per Bar Close.
+//
+// Phase 1 modules: configuration, OHLCV data, estimated order flow, CVD,
+// confirmed major/minor structure, premium/discount, session VWAP, dashboard,
+// candle coloring, and confirmed alerts. Later phases add liquidity pools and
+// sweeps, footprint approximations, absorption/exhaustion, FVG/OB/breakers,
+// volume profile, sessions, SMT, MTF, event history, and weighted confluence.
+//==============================================================================
+
+indicator("SMC Order Flow Intelligence Engine", "SMC OFIE", overlay = true, max_labels_count = 100)
+
+//------------------------------------------------------------------------------
+// Configuration
+//------------------------------------------------------------------------------
+groupGeneral = "GENERAL"
+groupData = "DATA ENGINE"
+groupStructure = "MARKET STRUCTURE"
+groupFlow = "ORDER FLOW / DELTA / CVD"
+groupPremium = "PREMIUM / DISCOUNT"
+groupVwap = "VWAP"
+groupDashboard = "DASHBOARD"
+groupVisuals = "VISUALS"
+groupAlerts = "ALERTS"
+
+mode = input.string("INTRADAY", "Recommended mode", options = ["SCALPING", "INTRADAY", "SWING", "SMC PURE", "ORDER FLOW PURE", "LIQUIDITY HUNT", "FULL CONFLUENCE"], group = groupGeneral)
+showStructure = input.bool(true, "Enable structure module", group = groupGeneral)
+showFlow = input.bool(true, "Enable estimated order-flow module", group = groupGeneral)
+showCvd = input.bool(true, "Enable CVD module", group = groupGeneral)
+showPremium = input.bool(true, "Enable premium/discount module", group = groupGeneral)
+showVwap = input.bool(true, "Enable VWAP module", group = groupGeneral)
+atrLength = input.int(14, "ATR length", minval = 1, group = groupData)
+volumeLength = input.int(20, "Relative-volume length", minval = 1, group = groupData)
+
+majorLen = input.int(10, "Major swing length", minval = 1, maxval = 50, group = groupStructure, tooltip = "Confirmed pivots require this many bars on both sides. Larger values reduce noise but increase confirmation delay.")
+minorLen = input.int(3, "Minor swing length", minval = 1, maxval = 25, group = groupStructure, tooltip = "Confirmed internal pivots require this many bars on both sides.")
+showMinor = input.bool(true, "Show minor structure", group = groupStructure)
+showBos = input.bool(true, "Show BOS / CHoCH / MSS", group = groupStructure)
+
+flowMethod = input.string("Composite pressure model", "Estimated order-flow method", options = ["Candle direction", "Close-location value", "Body/range pressure", "Wick/rejection pressure", "Composite pressure model"], group = groupFlow, tooltip = "All methods estimate pressure from OHLCV. None is true bid/ask aggressor volume.")
+cvdReset = input.string("Daily", "CVD reset", options = ["Never", "Daily", "Weekly", "Session", "Custom"], group = groupFlow)
+customReset = input.string("0000-2359", "Custom reset session", group = groupFlow, tooltip = "Valid Pine session format, for example 0000-2359 or 0930-1600. Invalid values safely produce no custom resets.")
+cvdMaLength = input.int(20, "CVD moving-average length", minval = 1, group = groupFlow)
+regimeThreshold = input.float(0.0, "CVD regime slope threshold", step = 0.1, group = groupFlow)
+
+premiumLevel = input.float(0.50, "Equilibrium level", minval = 0.01, maxval = 0.99, step = 0.01, group = groupPremium)
+discountLevel = input.float(0.62, "Discount threshold", minval = 0.01, maxval = 0.99, step = 0.01, group = groupPremium)
+premiumLevel2 = input.float(0.38, "Premium threshold", minval = 0.01, maxval = 0.99, step = 0.01, group = groupPremium)
+
+vwapSource = input.source(hlc3, "VWAP source", group = groupVwap)
+showBands = input.bool(true, "Show VWAP deviation bands", group = groupVwap)
+bandMult = input.float(1.0, "VWAP deviation multiplier", minval = 0.1, step = 0.1, group = groupVwap)
+
+showMarketDashboard = input.bool(true, "Show MARKET section", group = groupDashboard)
+showFlowDashboard = input.bool(true, "Show ORDER FLOW section", group = groupDashboard)
+showVwapDashboard = input.bool(true, "Show VWAP section", group = groupDashboard)
+showDashboard = input.bool(true, "Show dashboard", group = groupDashboard)
+dashboardPosition = input.string("Top right", "Dashboard position", options = ["Top left", "Top right", "Bottom left", "Bottom right"], group = groupDashboard)
+
+structureLabels = input.bool(true, "Structure labels", group = groupVisuals)
+colorMode = input.string("Delta", "Candle-coloring model", options = ["None", "Delta", "Relative Volume", "Structure", "Confluence"], group = groupVisuals)
+showSignals = input.bool(true, "Show signal markers", group = groupVisuals)
+
+alertsEnabled = input.bool(true, "Enable Phase 1 alerts", group = groupAlerts, tooltip = "Alert conditions are based only on confirmed or bar-close events implemented in this phase.")
+
+//------------------------------------------------------------------------------
+// Utility and data engine
+//------------------------------------------------------------------------------
+f_safeDiv(float numerator, float denominator) =>
+    na(denominator) or denominator == 0.0 ? 0.0 : numerator / denominator
+
+f_clamp(float value, float low, float high) =>
+    math.max(low, math.min(high, value))
+
+f_sessionValid(string sessionText) =>
+    str.length(sessionText) >= 9 and str.contains(sessionText, "-")
+
+barRange = math.max(high - low, syminfo.mintick)
+body = math.abs(close - open)
+upperWick = math.max(high - math.max(open, close), 0.0)
+lowerWick = math.max(math.min(open, close) - low, 0.0)
+clv = f_safeDiv((close - low) - (high - close), barRange)
+atr = ta.atr(atrLength)
+volumeMa = ta.sma(volume, volumeLength)
+relativeVolume = f_safeDiv(volume, volumeMa)
+
+//------------------------------------------------------------------------------
+// Estimated order-flow engine
+//------------------------------------------------------------------------------
+f_pressure(string method) =>
+    candle = close > open ? 1.0 : close < open ? -1.0 : 0.0
+    clvPressure = clv
+    bodyPressure = f_safeDiv(close - open, barRange)
+    wickPressure = f_safeDiv(lowerWick - upperWick, barRange)
+    method == "Candle direction" ? candle : method == "Close-location value" ? clvPressure : method == "Body/range pressure" ? bodyPressure : method == "Wick/rejection pressure" ? wickPressure : (candle + clvPressure + bodyPressure + wickPressure) / 4.0
+
+pressure = f_clamp(f_pressure(flowMethod), -1.0, 1.0)
+estimatedBuyVolume = volume * (1.0 + pressure) * 0.5
+estimatedSellVolume = volume * (1.0 - pressure) * 0.5
+estimatedDelta = estimatedBuyVolume - estimatedSellVolume
+estimatedDeltaPct = f_safeDiv(estimatedDelta, volume) * 100.0
+buyPressure = f_safeDiv(estimatedBuyVolume, volume)
+sellPressure = f_safeDiv(estimatedSellVolume, volume)
+deltaAcceleration = estimatedDelta - nz(estimatedDelta[1])
+
+//------------------------------------------------------------------------------
+// CVD engine
+//------------------------------------------------------------------------------
+newDay = ta.change(time("D")) != 0
+newWeek = ta.change(time("W")) != 0
+customSession = f_sessionValid(customReset) ? not na(time(timeframe.period, customReset)) : false
+newCustom = customSession and not customSession[1]
+newSession = ta.change(time("D", syminfo.timezone)) != 0
+resetCvd = cvdReset == "Daily" ? newDay : cvdReset == "Weekly" ? newWeek : cvdReset == "Session" ? newSession : cvdReset == "Custom" ? newCustom : false
+var float cvd = 0.0
+cvd := resetCvd ? estimatedDelta : nz(cvd[1]) + estimatedDelta
+cvdMa = ta.sma(cvd, cvdMaLength)
+cvdSlope = cvd - nz(cvd[1])
+cvdMomentum = cvd - nz(cvd[2])
+cvdAcceleration = cvdSlope - nz(cvdSlope[1])
+cvdRegime = cvdSlope > regimeThreshold and estimatedDelta >= 0 ? "STRONG BULLISH" : cvdSlope > regimeThreshold ? "BULLISH" : cvdSlope < -regimeThreshold and estimatedDelta <= 0 ? "STRONG BEARISH" : cvdSlope < -regimeThreshold ? "BEARISH" : "NEUTRAL"
+
+//------------------------------------------------------------------------------
+// Confirmed market structure engine
+//------------------------------------------------------------------------------
+majorHigh = ta.pivothigh(high, majorLen, majorLen)
+majorLow = ta.pivotlow(low, majorLen, majorLen)
+minorHigh = ta.pivothigh(high, minorLen, minorLen)
+minorLow = ta.pivotlow(low, minorLen, minorLen)
+
+var float lastMajorHigh = na
+var float priorMajorHigh = na
+var float lastMajorLow = na
+var float priorMajorLow = na
+var int majorTrend = 0
+var float lastMinorHigh = na
+var float lastMinorLow = na
+var int minorTrend = 0
+
+newMajorHigh = not na(majorHigh)
+newMajorLow = not na(majorLow)
+newMinorHigh = not na(minorHigh)
+newMinorLow = not na(minorLow)
+
+majorHH = newMajorHigh and not na(lastMajorHigh) and majorHigh > lastMajorHigh
+majorLH = newMajorHigh and not na(lastMajorHigh) and majorHigh < lastMajorHigh
+majorHL = newMajorLow and not na(lastMajorLow) and majorLow > lastMajorLow
+majorLL = newMajorLow and not na(lastMajorLow) and majorLow < lastMajorLow
+
+if newMajorHigh
+    priorMajorHigh := lastMajorHigh
+    lastMajorHigh := majorHigh
+if newMajorLow
+    priorMajorLow := lastMajorLow
+    lastMajorLow := majorLow
+
+bullBreak = showStructure and not na(lastMajorHigh) and close > lastMajorHigh and close[1] <= lastMajorHigh
+bearBreak = showStructure and not na(lastMajorLow) and close < lastMajorLow and close[1] >= lastMajorLow
+bullChoch = bullBreak and majorTrend < 0
+bearChoch = bearBreak and majorTrend > 0
+bullMss = bullBreak and majorTrend <= 0
+bearMss = bearBreak and majorTrend >= 0
+if bullBreak
+    majorTrend := 1
+if bearBreak
+    majorTrend := -1
+
+if newMinorHigh
+    lastMinorHigh := minorHigh
+if newMinorLow
+    lastMinorLow := minorLow
+minorBullBreak = showStructure and not na(lastMinorHigh) and close > lastMinorHigh and close[1] <= lastMinorHigh
+minorBearBreak = showStructure and not na(lastMinorLow) and close < lastMinorLow and close[1] >= lastMinorLow
+if minorBullBreak
+    minorTrend := 1
+if minorBearBreak
+    minorTrend := -1
+
+structureText = majorTrend > 0 ? "BULLISH" : majorTrend < 0 ? "BEARISH" : "NEUTRAL"
+
+//------------------------------------------------------------------------------
+// Premium / discount engine based on latest confirmed major range
+//------------------------------------------------------------------------------
+rangeHigh = lastMajorHigh
+rangeLow = lastMajorLow
+rangeSize = rangeHigh - rangeLow
+rangePosition = not na(rangeSize) and rangeSize > 0 ? f_safeDiv(close - rangeLow, rangeSize) : na
+equilibrium = not na(rangeSize) ? rangeLow + rangeSize * premiumLevel : na
+premiumBoundary = not na(rangeSize) ? rangeLow + rangeSize * premiumLevel2 : na
+discountBoundary = not na(rangeSize) ? rangeLow + rangeSize * discountLevel : na
+pdState = na(rangePosition) ? "UNAVAILABLE" : rangePosition >= discountLevel ? "DISCOUNT" : rangePosition <= premiumLevel2 ? "PREMIUM" : "EQUILIBRIUM"
+
+//------------------------------------------------------------------------------
+// Session VWAP engine
+//------------------------------------------------------------------------------
+vwap = showVwap ? ta.vwap(vwapSource) : na
+vwapDev = ta.stdev(vwapSource, volumeLength)
+vwapUpper = vwap + vwapDev * bandMult
+vwapLower = vwap - vwapDev * bandMult
+vwapReclaim = showVwap and ta.crossover(close, vwap)
+vwapLoss = showVwap and ta.crossunder(close, vwap)
+
+//------------------------------------------------------------------------------
+// Phase 1 state and visual outputs
+//------------------------------------------------------------------------------
+plot(showVwap ? vwap : na, "Session VWAP", color = color.new(color.aqua, 0), linewidth = 2)
+plot(showVwap and showBands ? vwapUpper : na, "VWAP upper deviation", color = color.new(color.aqua, 65))
+plot(showVwap and showBands ? vwapLower : na, "VWAP lower deviation", color = color.new(color.aqua, 65))
+plot(showPremium ? equilibrium : na, "Equilibrium", color = color.new(color.gray, 65), style = plot.style_linebr)
+
+plotshape(showSignals and structureLabels and majorHH, title = "Major HH", style = shape.labeldown, location = location.abovebar, offset = -majorLen, text = "HH", color = color.new(color.green, 15), textcolor = color.white, size = size.tiny)
+plotshape(showSignals and structureLabels and majorLH, title = "Major LH", style = shape.labeldown, location = location.abovebar, offset = -majorLen, text = "LH", color = color.new(color.orange, 15), textcolor = color.white, size = size.tiny)
+plotshape(showSignals and structureLabels and majorHL, title = "Major HL", style = shape.labelup, location = location.belowbar, offset = -majorLen, text = "HL", color = color.new(color.green, 15), textcolor = color.white, size = size.tiny)
+plotshape(showSignals and structureLabels and majorLL, title = "Major LL", style = shape.labelup, location = location.belowbar, offset = -majorLen, text = "LL", color = color.new(color.red, 15), textcolor = color.white, size = size.tiny)
+plotshape(showSignals and showBos and bullBreak, title = "Bullish BOS", style = shape.triangleup, location = location.belowbar, text = "BOS", color = color.green, textcolor = color.white, size = size.tiny)
+plotshape(showSignals and showBos and bearBreak, title = "Bearish BOS", style = shape.triangledown, location = location.abovebar, text = "BOS", color = color.red, textcolor = color.white, size = size.tiny)
+plotshape(showSignals and showBos and bullChoch, title = "Bullish CHoCH", style = shape.labelup, location = location.belowbar, text = "CHoCH", color = color.teal, textcolor = color.white, size = size.tiny)
+plotshape(showSignals and showBos and bearChoch, title = "Bearish CHoCH", style = shape.labeldown, location = location.abovebar, text = "CHoCH", color = color.maroon, textcolor = color.white, size = size.tiny)
+plotshape(showSignals and showBos and bullMss, title = "Bullish MSS", style = shape.labelup, location = location.belowbar, text = "MSS", color = color.blue, textcolor = color.white, size = size.tiny)
+plotshape(showSignals and showBos and bearMss, title = "Bearish MSS", style = shape.labeldown, location = location.abovebar, text = "MSS", color = color.purple, textcolor = color.white, size = size.tiny)
+plotshape(showSignals and vwapReclaim, title = "VWAP reclaim", style = shape.circle, location = location.belowbar, color = color.aqua, size = size.tiny)
+plotshape(showSignals and vwapLoss, title = "VWAP loss", style = shape.circle, location = location.abovebar, color = color.fuchsia, size = size.tiny)
+
+candleColor = colorMode == "Delta" ? estimatedDelta > 0 ? color.new(color.green, 55) : color.new(color.red, 55) : colorMode == "Relative Volume" ? relativeVolume > 1.5 ? color.new(color.orange, 45) : na : colorMode == "Structure" ? majorTrend > 0 ? color.new(color.green, 65) : majorTrend < 0 ? color.new(color.red, 65) : na : colorMode == "Confluence" ? majorTrend > 0 and estimatedDelta > 0 ? color.new(color.green, 45) : majorTrend < 0 and estimatedDelta < 0 ? color.new(color.red, 45) : na : na
+barcolor(candleColor)
+
+//------------------------------------------------------------------------------
+// Dashboard
+//------------------------------------------------------------------------------
+var table dashboard = table.new(dashboardPosition == "Top left" ? position.top_left : dashboardPosition == "Bottom left" ? position.bottom_left : dashboardPosition == "Bottom right" ? position.bottom_right : position.top_right, 2, 14, border_width = 1)
+if barstate.islast and showDashboard
+    table.clear(dashboard, 0, 0, 1, 13)
+    row = 0
+    table.cell(dashboard, 0, row, "SMC OFIE / " + mode, text_color = color.white, bgcolor = color.rgb(25, 35, 50))
+    table.cell(dashboard, 1, row, "PHASE 1", text_color = color.yellow, bgcolor = color.rgb(25, 35, 50))
+    row += 1
+    if showMarketDashboard
+        table.cell(dashboard, 0, row, "MARKET", text_color = color.aqua)
+        table.cell(dashboard, 1, row, structureText + " | " + pdState, text_color = color.white)
+        row += 1
+        table.cell(dashboard, 0, row, "CVD regime", text_color = color.gray)
+        table.cell(dashboard, 1, row, showCvd ? cvdRegime : "DISABLED", text_color = color.white)
+        row += 1
+        table.cell(dashboard, 0, row, "Major trend", text_color = color.gray)
+        table.cell(dashboard, 1, row, str.tostring(majorTrend), text_color = color.white)
+        row += 1
+    if showFlowDashboard
+        table.cell(dashboard, 0, row, "ORDER FLOW", text_color = color.aqua)
+        table.cell(dashboard, 1, row, "ESTIMATED / OHLCV", text_color = color.orange)
+        row += 1
+        table.cell(dashboard, 0, row, "Relative volume", text_color = color.gray)
+        table.cell(dashboard, 1, row, str.tostring(relativeVolume, "#.##"), text_color = color.white)
+        row += 1
+        table.cell(dashboard, 0, row, "Estimated delta %", text_color = color.gray)
+        table.cell(dashboard, 1, row, showFlow ? str.tostring(estimatedDeltaPct, "#.##") + "%" : "DISABLED", text_color = color.white)
+        row += 1
+        table.cell(dashboard, 0, row, "CVD", text_color = color.gray)
+        table.cell(dashboard, 1, row, showCvd ? str.tostring(cvd, "#.##") : "DISABLED", text_color = color.white)
+        row += 1
+    if showVwapDashboard
+        table.cell(dashboard, 0, row, "VWAP", text_color = color.aqua)
+        table.cell(dashboard, 1, row, showVwap ? str.tostring(vwap, "#.#####") : "DISABLED", text_color = color.white)
+        row += 1
+        table.cell(dashboard, 0, row, "VWAP state", text_color = color.gray)
+        table.cell(dashboard, 1, row, close > vwap ? "ABOVE" : "BELOW", text_color = color.white)
+        row += 1
+    table.cell(dashboard, 0, row, "Data honesty", text_color = color.gray)
+    table.cell(dashboard, 1, row, "No true DOM / bid-ask", text_color = color.orange)
+
+//------------------------------------------------------------------------------
+// Confirmed, Phase 1 alert conditions
+//------------------------------------------------------------------------------
+setupState = majorTrend > 0 and estimatedDelta > 0 ? "BULLISH CONTEXT" : majorTrend < 0 and estimatedDelta < 0 ? "BEARISH CONTEXT" : "NEUTRAL / WATCH"
+setupChanged = setupState != setupState[1]
+alertcondition(alertsEnabled and bullBreak, "Bullish BOS", "Confirmed bullish BOS in SMC OFIE")
+alertcondition(alertsEnabled and bearBreak, "Bearish BOS", "Confirmed bearish BOS in SMC OFIE")
+alertcondition(alertsEnabled and bullChoch, "Bullish CHoCH", "Confirmed bullish CHoCH in SMC OFIE")
+alertcondition(alertsEnabled and bearChoch, "Bearish CHoCH", "Confirmed bearish CHoCH in SMC OFIE")
+alertcondition(alertsEnabled and bullMss, "Bullish MSS", "Confirmed bullish MSS in SMC OFIE")
+alertcondition(alertsEnabled and bearMss, "Bearish MSS", "Confirmed bearish MSS in SMC OFIE")
+alertcondition(alertsEnabled and vwapReclaim, "VWAP reclaim", "Price reclaimed session VWAP")
+alertcondition(alertsEnabled and vwapLoss, "VWAP loss", "Price lost session VWAP")
+alertcondition(alertsEnabled and setupChanged, "Setup state change", "SMC OFIE context state changed")
