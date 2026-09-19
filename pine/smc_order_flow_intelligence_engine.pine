@@ -61,7 +61,8 @@ bodyRange = close - open
 upperWick = math.max(high - math.max(open, close), 0.0)
 lowerWick = math.max(math.min(open, close) - low, 0.0)
 clv = f_safeDiv((close - low) - (high - close), barRange)
-volumeAverage = ta.sma(volume, volumeMaLength)
+volumeMa = ta.sma(volume, volumeMaLength)
+volumeParticipation = f_clamp(f_safeDiv(volume, volumeMa), 0.0, 1.0)
 
 candleDirectionPressure = close > open ? 1.0 : close < open ? -1.0 : 0.0
 clvPressure = clv
@@ -74,7 +75,7 @@ rawPressure = deltaMethod == "Candle Direction" ? candleDirectionPressure :
      deltaMethod == "Wick Pressure" ? wickPressure :
      (candleDirectionPressure + clvPressure + bodyPressure + wickPressure) / 4.0
 
-estimatedPressure = f_clamp(rawPressure, -1.0, 1.0)
+estimatedPressure = f_clamp(rawPressure * volumeParticipation, -1.0, 1.0)
 estimatedPressurePct = estimatedPressure * 100.0
 
 estimatedBuyVolume = volume * (1.0 + estimatedPressure) * 0.5
