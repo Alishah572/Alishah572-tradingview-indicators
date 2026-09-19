@@ -1,160 +1,44 @@
 //@version=6
-//==============================================================================
-// SMC Order Flow Intelligence Engine (Full bounded implementation)
-//==============================================================================
-// Direct TradingView data: OHLCV, time/session states, request.security values.
-// Derived measurements: structure pivots, VWAP/bands, premium-discount, profile POC,
-// session range statistics, HTF trend context.
-// Heuristic / estimated measurements: estimated order flow, estimated delta/CVD,
-// OHLCV footprint approximation, liquidity behavior model, confluence state.
-//
-// Data honesty: Pine does not provide historical DOM, true bid/ask aggressor flags,
-// or full exchange footprint tape. All order-flow style modules are explicitly
-// estimated from OHLCV and volume.
-//
-// Non-repainting policy:
-// - No lookahead_on is used.
-// - Pivot events are only consumed after right-side confirmation.
-// - HTF context uses confirmed (previous closed HTF bar) values.
-// - Realtime/developing bars can change until bar close.
-//==============================================================================
-indicator("SMC Order Flow Intelligence Engine", "SMC OFIE", overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 300)
+indicator("OHLCV Estimated CVD / Delta Pressure Analyzer", "OHLCV CVD Delta", overlay = false)
 
 //------------------------------------------------------------------------------
-// INPUT GROUPS
+// DATA HONESTY
 //------------------------------------------------------------------------------
-groupGeneral = "GENERAL"
-groupModules = "MODULE ENABLE/DISABLE"
-groupData = "DATA ENGINE"
-groupStructure = "MARKET STRUCTURE ENGINE"
-groupLiquidity = "LIQUIDITY + SWEEP ENGINE"
-groupFlow = "ESTIMATED ORDER FLOW / DELTA / CVD"
-groupFootprint = "FOOTPRINT APPROX / ABSORPTION / EXHAUSTION"
-groupImbalance = "FVG / IFVG / DISPLACEMENT"
-groupBlocks = "ORDER BLOCKS / BREAKERS"
-groupPd = "PREMIUM-DISCOUNT / DEALER RANGE"
-groupVwap = "VWAP ENGINE"
-groupProfile = "VOLUME PROFILE APPROX"
-groupSession = "SESSION ENGINE"
-groupSMT = "SMT / INTERMARKET DIVERGENCE"
-groupMTF = "NON-REPAINTING MTF CONTEXT"
-groupRegime = "MARKET REGIME + CONFLUENCE"
-groupVisuals = "VISUALS + OBJECT LIMITS"
-groupDashboard = "DASHBOARD"
-groupAlerts = "ALERTS"
-
-mode = input.string("INTRADAY", "Mode", options = ["SCALPING", "INTRADAY", "SWING"], group = groupGeneral)
-
-// Module toggles
-enableStructure = input.bool(true, "Market Structure", group = groupModules)
-enableLiquidity = input.bool(true, "Liquidity Pools", group = groupModules)
-enableSweeps = input.bool(true, "Liquidity Sweeps", group = groupModules)
-enableLiquidityBehavior = input.bool(true, "Liquidity Behavior Model", group = groupModules)
-enableOrderFlow = input.bool(true, "Estimated Order Flow", group = groupModules)
-enableCvd = input.bool(true, "Delta/CVD + Regime/Divergence", group = groupModules)
-enableFootprint = input.bool(true, "OHLCV Footprint Approximation", group = groupModules)
-enableAbsExh = input.bool(true, "Absorption + Exhaustion", group = groupModules)
-enableDisplacement = input.bool(true, "Displacement", group = groupModules)
-enableFvg = input.bool(true, "FVG", group = groupModules)
-enableIfvg = input.bool(true, "IFVG", group = groupModules)
-enableOrderBlocks = input.bool(true, "Order Blocks", group = groupModules)
-enableBreakerBlocks = input.bool(true, "Breaker Blocks", group = groupModules)
-enablePd = input.bool(true, "Premium/Discount + Dealer Range", group = groupModules)
-enableVwap = input.bool(true, "VWAP", group = groupModules)
-enableProfile = input.bool(true, "Volume Profile Approximation", group = groupModules)
-enableSession = input.bool(true, "Session Engine", group = groupModules)
-enableSMT = input.bool(true, "SMT / Intermarket", group = groupModules)
-enableMTF = input.bool(true, "Confirmed HTF Context", group = groupModules)
-enableRegime = input.bool(true, "Market Regime", group = groupModules)
-enableConfluence = input.bool(true, "Weighted Confluence + Signal Quality", group = groupModules)
-enableSequence = input.bool(true, "Entry/Event Sequence", group = groupModules)
-enableDashboard = input.bool(true, "Dashboard", group = groupModules)
-enableVisuals = input.bool(true, "Visual Layers", group = groupModules)
-enableAlerts = input.bool(true, "Alert Conditions", group = groupModules)
-
-// Data engine
-atrLength = input.int(14, "ATR length", minval = 1, group = groupData)
-volLength = input.int(20, "Volume MA length", minval = 1, group = groupData)
-
-// Structure
-majorLen = input.int(10, "Major swing length", minval = 1, maxval = 50, group = groupStructure)
-minorLen = input.int(3, "Minor swing length", minval = 1, maxval = 20, group = groupStructure)
-showMinor = input.bool(true, "Show minor structure", group = groupStructure)
-
-// Liquidity
-liqToleranceAtr = input.float(0.08, "EQH/EQL tolerance (ATR multiple)", step = 0.01, minval = 0.0, group = groupLiquidity)
-liquidityLifeBars = input.int(250, "Liquidity line lifetime bars", minval = 10, maxval = 2000, group = groupLiquidity)
-
-// Flow / CVD
-flowMethod = input.string("Composite pressure model", "Estimated flow model", options = ["Candle direction", "Close-location value", "Body/range pressure", "Wick/rejection pressure", "Composite pressure model"], group = groupFlow)
-cvdReset = input.string("Daily", "CVD reset", options = ["Never", "Daily", "Weekly", "Session", "Custom"], group = groupFlow)
-customReset = input.string("0000-2359", "Custom reset session", group = groupFlow)
-cvdMaLength = input.int(20, "CVD MA length", minval = 1, group = groupFlow)
-divPivotLen = input.int(5, "Divergence pivot length", minval = 2, maxval = 20, group = groupFlow)
-
-// Footprint approximation
-absorptionVolumeMult = input.float(1.8, "Absorption volume threshold (x avg)", minval = 0.5, step = 0.1, group = groupFootprint)
-smallBodyRatio = input.float(0.35, "Small body ratio", minval = 0.05, maxval = 1.0, step = 0.05, group = groupFootprint)
-exhaustionVolumeMult = input.float(0.75, "Exhaustion volume threshold (x avg)", minval = 0.1, step = 0.05, group = groupFootprint)
-displacementBodyRatio = input.float(0.70, "Displacement body/range threshold", minval = 0.2, maxval = 1.0, step = 0.05, group = groupImbalance)
-
-// OB/FVG
-obLookback = input.int(8, "Order block source lookback", minval = 1, maxval = 30, group = groupBlocks)
-
-// PD / Dealer range
-dealerLength = input.int(50, "Dealer range lookback", minval = 10, maxval = 500, group = groupPd)
-premiumBoundaryPct = input.float(0.62, "Premium boundary", minval = 0.05, maxval = 0.95, step = 0.01, group = groupPd)
-discountBoundaryPct = input.float(0.38, "Discount boundary", minval = 0.05, maxval = 0.95, step = 0.01, group = groupPd)
-
-// VWAP
-vwapSource = input.source(hlc3, "VWAP source", group = groupVwap)
-showVwapBands = input.bool(true, "Show VWAP deviation bands", group = groupVwap)
-vwapBandMult = input.float(1.0, "VWAP deviation multiplier", minval = 0.1, step = 0.1, group = groupVwap)
-
-// Volume profile approximation
-vpLookback = input.int(120, "Profile lookback", minval = 20, maxval = 800, group = groupProfile)
-vpBinsCount = input.int(24, "Profile bins", minval = 8, maxval = 60, group = groupProfile)
-vpDecay = input.float(0.02, "Per-bar profile decay", minval = 0.0, maxval = 0.25, step = 0.01, group = groupProfile)
-
-// Sessions
-sessionAsia = input.session("0000-0600", "Asia session", group = groupSession)
-sessionLondon = input.session("0700-1100", "London session", group = groupSession)
-sessionNewYork = input.session("1330-1700", "New York session", group = groupSession)
-
-// SMT / intermarket
-smtSymbol = input.symbol("NASDAQ:QQQ", "SMT comparison symbol", group = groupSMT)
-smtPivotLen = input.int(5, "SMT pivot length", minval = 2, maxval = 20, group = groupSMT)
-
-// MTF
-htfTf = input.timeframe("240", "Higher timeframe", group = groupMTF)
-htfEmaLength = input.int(34, "HTF EMA length", minval = 2, maxval = 200, group = groupMTF)
-
-// Regime + confluence
-regimeTrendThreshold = input.float(1.2, "Trend regime threshold", minval = 0.1, step = 0.1, group = groupRegime)
-regimeVolatilityThreshold = input.float(0.015, "High volatility threshold (ATR/close)", minval = 0.001, step = 0.001, group = groupRegime)
-confluenceThreshold = input.float(65.0, "Confluence threshold", minval = 5.0, maxval = 100.0, step = 1.0, group = groupRegime)
-weightStructure = input.float(20, "Weight: structure", minval = 0, maxval = 100, group = groupRegime)
-weightSweep = input.float(15, "Weight: sweep behavior", minval = 0, maxval = 100, group = groupRegime)
-weightFlow = input.float(15, "Weight: flow", minval = 0, maxval = 100, group = groupRegime)
-weightCvd = input.float(15, "Weight: CVD", minval = 0, maxval = 100, group = groupRegime)
-weightVwap = input.float(10, "Weight: VWAP", minval = 0, maxval = 100, group = groupRegime)
-weightPd = input.float(10, "Weight: PD", minval = 0, maxval = 100, group = groupRegime)
-weightMTF = input.float(15, "Weight: MTF", minval = 0, maxval = 100, group = groupRegime)
-
-// Visuals / object limits
-showStructureLabels = input.bool(true, "Structure labels", group = groupVisuals)
-showSignalMarks = input.bool(true, "Event markers", group = groupVisuals)
-showZones = input.bool(true, "Draw zones (FVG/OB)", group = groupVisuals)
-maxLiquidityLines = input.int(30, "Max liquidity lines", minval = 5, maxval = 120, group = groupVisuals)
-maxZoneBoxes = input.int(50, "Max zone boxes", minval = 10, maxval = 120, group = groupVisuals)
-maxEventLabels = input.int(40, "Max event labels", minval = 5, maxval = 120, group = groupVisuals)
-
-// Dashboard / alerts
-dashboardPosition = input.string("Top right", "Dashboard position", options = ["Top left", "Top right", "Bottom left", "Bottom right"], group = groupDashboard)
-alertsBarCloseOnly = input.bool(true, "Require bar close confirmation", group = groupAlerts)
+// This indicator estimates buy volume, sell volume, delta, and CVD from OHLCV.
+// Pine does not provide historical DOM, true bid/ask aggressor flow, or exact
+// footprint tape reconstruction.
 
 //------------------------------------------------------------------------------
-// UTILITY HELPERS
+// INPUTS
+//------------------------------------------------------------------------------
+groupData = "Data"
+groupDelta = "Delta"
+groupDisplay = "Display"
+groupAlerts = "Alerts"
+
+volumeMaLength = input.int(20, "Volume MA Length", minval = 1, group = groupData)
+deltaMethod = input.string("Composite", "Delta Estimation Method", options = ["Candle Direction", "CLV", "Body/Range", "Wick Pressure", "Composite"], group = groupData)
+
+deltaAverageLength = input.int(20, "Average Delta Length", minval = 1, group = groupDelta)
+cvdResetMode = input.string("Daily", "CVD Reset Mode", options = ["Never", "Daily", "Weekly", "Session", "Custom"], group = groupDelta)
+customResetSession = input.session("0930-1600", "Custom Reset Session", group = groupDelta)
+cvdAverageLength = input.int(34, "CVD Average Length", minval = 1, group = groupDelta)
+
+showPerBarPressure = input.bool(true, "Show Estimated Per-Bar Delta Pressure", group = groupDisplay)
+showDelta = input.bool(true, "Show Estimated Delta Per Bar", group = groupDisplay)
+showDeltaAverage = input.bool(true, "Show Average Delta", group = groupDisplay)
+showCvd = input.bool(true, "Show Estimated Cumulative Volume Delta (CVD)", group = groupDisplay)
+showCvdAverage = input.bool(true, "Show CVD Average", group = groupDisplay)
+showZeroLine = input.bool(true, "Show Zero Line", group = groupDisplay)
+pressureAsColumns = input.bool(true, "Pressure Style: Columns (off = Histogram)", group = groupDisplay)
+deltaAsColumns = input.bool(true, "Delta Style: Columns (off = Histogram)", group = groupDisplay)
+normalizeForPane = input.bool(false, "Normalize Delta/CVD For Readability", group = groupDisplay)
+normalizationLength = input.int(100, "Normalization Length", minval = 10, group = groupDisplay)
+
+alertsBarCloseOnly = input.bool(true, "Require Bar-Close Confirmation", group = groupAlerts)
+
+//------------------------------------------------------------------------------
+// HELPERS
 //------------------------------------------------------------------------------
 f_safeDiv(float numerator, float denominator) =>
     na(denominator) or denominator == 0.0 ? 0.0 : numerator / denominator
@@ -162,654 +46,108 @@ f_safeDiv(float numerator, float denominator) =>
 f_clamp(float value, float low, float high) =>
     math.max(low, math.min(high, value))
 
-f_boolToFloat(bool x) =>
-    x ? 1.0 : 0.0
-
 f_sessionValid(string sessionText) =>
     str.length(sessionText) >= 9 and str.contains(sessionText, "-")
 
-f_pushLine(array<line> storage, line item, int cap) =>
-    array.push(storage, item)
-    if array.size(storage) > cap
-        old = array.shift(storage)
-        line.delete(old)
-
-f_pushBox(array<box> storage, array<int> dirs, box item, int dir, int cap) =>
-    array.push(storage, item)
-    array.push(dirs, dir)
-    if array.size(storage) > cap
-        old = array.shift(storage)
-        array.shift(dirs)
-        box.delete(old)
-
-f_pushLabel(array<label> storage, label item, int cap) =>
-    array.push(storage, item)
-    if array.size(storage) > cap
-        old = array.shift(storage)
-        label.delete(old)
-
-f_markEvent(array<label> storage, bool cond, string txt, bool above, color bg, int cap) =>
-    if cond and enableVisuals and showSignalMarks
-        y = above ? high : low
-        style = above ? label.style_label_down : label.style_label_up
-        l = label.new(bar_index, y, txt, style = style, textcolor = color.white, color = bg, size = size.tiny)
-        f_pushLabel(storage, l, cap)
+f_zNormalize(float src, int length) =>
+    stdev = ta.stdev(src, length)
+    stdev == 0.0 or na(stdev) ? 0.0 : (src - ta.sma(src, length)) / stdev
 
 //------------------------------------------------------------------------------
-// DATA ENGINE
+// OHLCV-DERIVED DELTA ESTIMATION
 //------------------------------------------------------------------------------
 barRange = math.max(high - low, syminfo.mintick)
-body = math.abs(close - open)
+bodyRange = close - open
 upperWick = math.max(high - math.max(open, close), 0.0)
 lowerWick = math.max(math.min(open, close) - low, 0.0)
 clv = f_safeDiv((close - low) - (high - close), barRange)
-atr = ta.atr(atrLength)
-volumeMa = ta.sma(volume, volLength)
-relativeVolume = f_safeDiv(volume, volumeMa)
-bodyRatio = f_safeDiv(body, barRange)
+volumeAverage = ta.sma(volume, volumeMaLength)
 
-//------------------------------------------------------------------------------
-// ESTIMATED ORDER FLOW ENGINE
-//------------------------------------------------------------------------------
-f_pressure(string method) =>
-    candle = close > open ? 1.0 : close < open ? -1.0 : 0.0
-    clvPressure = clv
-    bodyPressure = f_safeDiv(close - open, barRange)
-    wickPressure = f_safeDiv(lowerWick - upperWick, barRange)
-    method == "Candle direction" ? candle : method == "Close-location value" ? clvPressure : method == "Body/range pressure" ? bodyPressure : method == "Wick/rejection pressure" ? wickPressure : (candle + clvPressure + bodyPressure + wickPressure) / 4.0
+candleDirectionPressure = close > open ? 1.0 : close < open ? -1.0 : 0.0
+clvPressure = clv
+bodyPressure = f_safeDiv(bodyRange, barRange)
+wickPressure = f_safeDiv(lowerWick - upperWick, barRange)
 
-pressure = enableOrderFlow ? f_clamp(f_pressure(flowMethod), -1.0, 1.0) : 0.0
-estimatedBuyVolume = volume * (1.0 + pressure) * 0.5
-estimatedSellVolume = volume * (1.0 - pressure) * 0.5
+rawPressure = deltaMethod == "Candle Direction" ? candleDirectionPressure :
+     deltaMethod == "CLV" ? clvPressure :
+     deltaMethod == "Body/Range" ? bodyPressure :
+     deltaMethod == "Wick Pressure" ? wickPressure :
+     (candleDirectionPressure + clvPressure + bodyPressure + wickPressure) / 4.0
+
+estimatedPressure = f_clamp(rawPressure, -1.0, 1.0)
+estimatedPressurePct = estimatedPressure * 100.0
+
+estimatedBuyVolume = volume * (1.0 + estimatedPressure) * 0.5
+estimatedSellVolume = volume * (1.0 - estimatedPressure) * 0.5
 estimatedDelta = estimatedBuyVolume - estimatedSellVolume
-estimatedDeltaPct = f_safeDiv(estimatedDelta, volume) * 100.0
-buyPressure = f_safeDiv(estimatedBuyVolume, volume)
-sellPressure = f_safeDiv(estimatedSellVolume, volume)
+averageDelta = ta.sma(estimatedDelta, deltaAverageLength)
 
 //------------------------------------------------------------------------------
-// DELTA / CVD ENGINE + REGIME + DIVERGENCE
+// CVD WITH RESET MODES
 //------------------------------------------------------------------------------
 newDay = ta.change(time("D")) != 0
 newWeek = ta.change(time("W")) != 0
-sessionResetActive = f_sessionValid(customReset) ? not na(time(timeframe.period, customReset)) : false
-newCustomReset = sessionResetActive and not sessionResetActive[1]
-newSession = ta.change(time("D", syminfo.timezone)) != 0
-resetCvd = cvdReset == "Daily" ? newDay : cvdReset == "Weekly" ? newWeek : cvdReset == "Session" ? newSession : cvdReset == "Custom" ? newCustomReset : false
+sessionBar = time(timeframe.period, syminfo.session)
+newSession = not na(sessionBar) and na(sessionBar[1])
+customSessionBar = f_sessionValid(customResetSession) ? time(timeframe.period, customResetSession) : na
+newCustomReset = not na(customSessionBar) and na(customSessionBar[1])
 
-var float cvd = 0.0
-cvd := enableCvd ? (resetCvd ? estimatedDelta : nz(cvd[1]) + estimatedDelta) : 0.0
-cvdMa = ta.sma(cvd, cvdMaLength)
-cvdSlope = cvd - nz(cvd[1])
-cvdRegime = cvdSlope > 0 and estimatedDelta > 0 ? "BULLISH" : cvdSlope < 0 and estimatedDelta < 0 ? "BEARISH" : "NEUTRAL"
+resetCvd = cvdResetMode == "Daily" ? newDay :
+     cvdResetMode == "Weekly" ? newWeek :
+     cvdResetMode == "Session" ? newSession :
+     cvdResetMode == "Custom" ? newCustomReset : false
 
-pricePivotHigh = ta.pivothigh(high, divPivotLen, divPivotLen)
-pricePivotLow = ta.pivotlow(low, divPivotLen, divPivotLen)
-cvdPivotHigh = ta.pivothigh(cvd, divPivotLen, divPivotLen)
-cvdPivotLow = ta.pivotlow(cvd, divPivotLen, divPivotLen)
+var float cumulativeDelta = 0.0
+cumulativeDelta := resetCvd ? estimatedDelta : nz(cumulativeDelta[1]) + estimatedDelta
+cvdAverage = ta.sma(cumulativeDelta, cvdAverageLength)
 
-var float prevPricePivotHigh = na
-var float prevPricePivotLow = na
-var float prevCvdPivotHigh = na
-var float prevCvdPivotLow = na
-
-bullCvdDiv = false
-bearCvdDiv = false
-if enableCvd
-    if not na(pricePivotLow) and not na(cvdPivotLow)
-        bullCvdDiv := not na(prevPricePivotLow) and not na(prevCvdPivotLow) and pricePivotLow < prevPricePivotLow and cvdPivotLow > prevCvdPivotLow
-        prevPricePivotLow := pricePivotLow
-        prevCvdPivotLow := cvdPivotLow
-    if not na(pricePivotHigh) and not na(cvdPivotHigh)
-        bearCvdDiv := not na(prevPricePivotHigh) and not na(prevCvdPivotHigh) and pricePivotHigh > prevPricePivotHigh and cvdPivotHigh < prevCvdPivotHigh
-        prevPricePivotHigh := pricePivotHigh
-        prevCvdPivotHigh := cvdPivotHigh
+// Optional normalization for readability in one pane.
+displayDelta = normalizeForPane ? f_zNormalize(estimatedDelta, normalizationLength) * 25.0 : estimatedDelta
+displayAvgDelta = normalizeForPane ? f_zNormalize(averageDelta, normalizationLength) * 25.0 : averageDelta
+displayCvd = normalizeForPane ? f_zNormalize(cumulativeDelta, normalizationLength) * 50.0 : cumulativeDelta
+displayCvdAverage = normalizeForPane ? f_zNormalize(cvdAverage, normalizationLength) * 50.0 : cvdAverage
 
 //------------------------------------------------------------------------------
-// MARKET STRUCTURE ENGINE (confirmed pivots only)
+// PLOTS
 //------------------------------------------------------------------------------
-majorHigh = ta.pivothigh(high, majorLen, majorLen)
-majorLow = ta.pivotlow(low, majorLen, majorLen)
-minorHigh = ta.pivothigh(high, minorLen, minorLen)
-minorLow = ta.pivotlow(low, minorLen, minorLen)
+zeroColor = color.new(color.gray, 70)
+if showZeroLine
+    hline(0.0, "Zero", color = zeroColor, linestyle = hline.style_dotted)
 
-var float lastMajorHigh = na
-var float lastMajorLow = na
-var float prevMajorHigh = na
-var float prevMajorLow = na
-var float lastMinorHigh = na
-var float lastMinorLow = na
-var int majorTrend = 0
-var int minorTrend = 0
+pressureColor = estimatedPressurePct >= 0 ? color.new(color.lime, 0) : color.new(color.red, 0)
+deltaColor = displayDelta >= 0 ? color.new(color.teal, 0) : color.new(color.orange, 0)
 
-newMajorHigh = enableStructure and not na(majorHigh)
-newMajorLow = enableStructure and not na(majorLow)
-newMinorHigh = enableStructure and not na(minorHigh)
-newMinorLow = enableStructure and not na(minorLow)
-
-majorHH = newMajorHigh and not na(lastMajorHigh) and majorHigh > lastMajorHigh
-majorLH = newMajorHigh and not na(lastMajorHigh) and majorHigh < lastMajorHigh
-majorHL = newMajorLow and not na(lastMajorLow) and majorLow > lastMajorLow
-majorLL = newMajorLow and not na(lastMajorLow) and majorLow < lastMajorLow
-
-if newMajorHigh
-    prevMajorHigh := lastMajorHigh
-    lastMajorHigh := majorHigh
-if newMajorLow
-    prevMajorLow := lastMajorLow
-    lastMajorLow := majorLow
-
-if newMinorHigh
-    lastMinorHigh := minorHigh
-if newMinorLow
-    lastMinorLow := minorLow
-
-bullBos = enableStructure and not na(lastMajorHigh) and close > lastMajorHigh and close[1] <= lastMajorHigh
-bearBos = enableStructure and not na(lastMajorLow) and close < lastMajorLow and close[1] >= lastMajorLow
-bullChoch = bullBos and majorTrend < 0
-bearChoch = bearBos and majorTrend > 0
-bullMss = bullBos and majorTrend <= 0
-bearMss = bearBos and majorTrend >= 0
-
-if bullBos
-    majorTrend := 1
-if bearBos
-    majorTrend := -1
-
-minorBullBos = enableStructure and showMinor and not na(lastMinorHigh) and close > lastMinorHigh and close[1] <= lastMinorHigh
-minorBearBos = enableStructure and showMinor and not na(lastMinorLow) and close < lastMinorLow and close[1] >= lastMinorLow
-if minorBullBos
-    minorTrend := 1
-if minorBearBos
-    minorTrend := -1
-
-structureState = majorTrend > 0 ? "BULLISH" : majorTrend < 0 ? "BEARISH" : "NEUTRAL"
+plot(showPerBarPressure ? estimatedPressurePct : na, "Estimated Per-Bar Delta Pressure (OHLCV %)", style = pressureAsColumns ? plot.style_columns : plot.style_histogram, color = pressureColor, linewidth = 2)
+plot(showDelta ? displayDelta : na, "Estimated Delta Per Bar (OHLCV)", style = deltaAsColumns ? plot.style_columns : plot.style_histogram, color = deltaColor, linewidth = 1)
+plot(showDeltaAverage ? displayAvgDelta : na, "Estimated Average Delta (OHLCV)", color = color.new(color.blue, 0), linewidth = 2)
+plot(showCvd ? displayCvd : na, "Estimated Cumulative Volume Delta CVD (OHLCV)", color = color.new(color.yellow, 0), linewidth = 2)
+plot(showCvdAverage ? displayCvdAverage : na, "Estimated CVD Average (OHLCV)", color = color.new(color.purple, 0), linewidth = 2)
 
 //------------------------------------------------------------------------------
-// LIQUIDITY ENGINE + SWEEP ENGINE + LIQUIDITY BEHAVIOR MODEL
+// ALERTS
 //------------------------------------------------------------------------------
-liqTol = atr * liqToleranceAtr
+alertGate = alertsBarCloseOnly ? barstate.isconfirmed : true
+positivePressure = estimatedPressurePct > 0
+negativePressure = estimatedPressurePct < 0
+deltaCrossUp = ta.crossover(estimatedDelta, averageDelta)
+deltaCrossDown = ta.crossunder(estimatedDelta, averageDelta)
+cvdCrossUp = ta.crossover(cumulativeDelta, cvdAverage)
+cvdCrossDown = ta.crossunder(cumulativeDelta, cvdAverage)
+cvdZeroCrossUp = ta.crossover(cumulativeDelta, 0.0)
+cvdZeroCrossDown = ta.crossunder(cumulativeDelta, 0.0)
 
-var array<line> liquidityLines = array.new_line()
-var array<float> liquidityPrices = array.new_float()
-var array<int> liquidityDirs = array.new_int()   // 1 = EQH, -1 = EQL
-var array<int> liquidityBars = array.new_int()
-
-f_addLiquidity(float price, int dir, int pivotBarIndex) =>
-    lColor = dir == 1 ? color.new(color.red, 35) : color.new(color.green, 35)
-    l = line.new(pivotBarIndex, price, bar_index, price, extend = extend.right, color = lColor, width = 1, style = line.style_dashed)
-    f_pushLine(liquidityLines, l, maxLiquidityLines)
-    array.push(liquidityPrices, price)
-    array.push(liquidityDirs, dir)
-    array.push(liquidityBars, pivotBarIndex)
-    if array.size(liquidityPrices) > maxLiquidityLines
-        array.shift(liquidityPrices)
-        array.shift(liquidityDirs)
-        array.shift(liquidityBars)
-
-if enableLiquidity and newMajorHigh and not na(prevMajorHigh) and math.abs(majorHigh - prevMajorHigh) <= liqTol
-    f_addLiquidity(majorHigh, 1, bar_index - majorLen)
-if enableLiquidity and newMajorLow and not na(prevMajorLow) and math.abs(majorLow - prevMajorLow) <= liqTol
-    f_addLiquidity(majorLow, -1, bar_index - majorLen)
-
-sweepHigh = false
-sweepLow = false
-if enableSweeps and array.size(liquidityPrices) > 0
-    for i = array.size(liquidityPrices) - 1 to 0
-        price = array.get(liquidityPrices, i)
-        dir = array.get(liquidityDirs, i)
-        bornBar = array.get(liquidityBars, i)
-        ageExpired = bar_index - bornBar > liquidityLifeBars
-        swept = (dir == 1 and high > price + liqTol and close < price) or (dir == -1 and low < price - liqTol and close > price)
-        if swept
-            sweepHigh := sweepHigh or dir == 1
-            sweepLow := sweepLow or dir == -1
-            ln = array.get(liquidityLines, i)
-            line.set_color(ln, color.new(color.yellow, 0))
-            line.set_style(ln, line.style_solid)
-            array.remove(liquidityPrices, i)
-            array.remove(liquidityDirs, i)
-            array.remove(liquidityBars, i)
-            deadLine = array.remove(liquidityLines, i)
-            line.delete(deadLine)
-        else if ageExpired
-            array.remove(liquidityPrices, i)
-            array.remove(liquidityDirs, i)
-            array.remove(liquidityBars, i)
-            deadLine = array.remove(liquidityLines, i)
-            line.delete(deadLine)
-
-liquidityBehavior = "NEUTRAL"
-bullSweepReversal = enableLiquidityBehavior and sweepLow and estimatedDelta > 0 and close > open
-bearSweepReversal = enableLiquidityBehavior and sweepHigh and estimatedDelta < 0 and close < open
-if bullSweepReversal
-    liquidityBehavior := "BULLISH SWEEP REVERSAL"
-else if bearSweepReversal
-    liquidityBehavior := "BEARISH SWEEP REVERSAL"
-else if sweepLow or sweepHigh
-    liquidityBehavior := "SWEEP / NO CONFIRMATION"
+alertcondition(alertGate and positivePressure, "Estimated Positive Delta Pressure", "Estimated OHLCV delta pressure is positive.")
+alertcondition(alertGate and negativePressure, "Estimated Negative Delta Pressure", "Estimated OHLCV delta pressure is negative.")
+alertcondition(alertGate and deltaCrossUp, "Estimated Delta Crossed Above Average", "Estimated OHLCV delta crossed above its average.")
+alertcondition(alertGate and deltaCrossDown, "Estimated Delta Crossed Below Average", "Estimated OHLCV delta crossed below its average.")
+alertcondition(alertGate and cvdCrossUp, "Estimated CVD Crossed Above Average", "Estimated OHLCV CVD crossed above its average.")
+alertcondition(alertGate and cvdCrossDown, "Estimated CVD Crossed Below Average", "Estimated OHLCV CVD crossed below its average.")
+alertcondition(alertGate and cvdZeroCrossUp, "Estimated CVD Crossed Above Zero", "Estimated OHLCV CVD crossed above the zero line.")
+alertcondition(alertGate and cvdZeroCrossDown, "Estimated CVD Crossed Below Zero", "Estimated OHLCV CVD crossed below the zero line.")
 
 //------------------------------------------------------------------------------
-// FOOTPRINT-STYLE OHLCV APPROX + ABSORPTION/EXHAUSTION
+// NOTES
 //------------------------------------------------------------------------------
-footprintBuyBody = volume * math.max(close - open, 0) / barRange
-footprintSellBody = volume * math.max(open - close, 0) / barRange
-footprintUpperWick = volume * upperWick / barRange
-footprintLowerWick = volume * lowerWick / barRange
-footprintImbalance = f_safeDiv(math.max(estimatedBuyVolume, estimatedSellVolume), math.max(math.min(estimatedBuyVolume, estimatedSellVolume), 1.0))
-
-bullAbsorption = enableAbsExh and enableFootprint and relativeVolume > absorptionVolumeMult and bodyRatio < smallBodyRatio and lowerWick > body * 1.2
-bearAbsorption = enableAbsExh and enableFootprint and relativeVolume > absorptionVolumeMult and bodyRatio < smallBodyRatio and upperWick > body * 1.2
-bullExhaustion = enableAbsExh and enableFootprint and relativeVolume < exhaustionVolumeMult and upperWick > body * 1.3 and close > open
-bearExhaustion = enableAbsExh and enableFootprint and relativeVolume < exhaustionVolumeMult and lowerWick > body * 1.3 and close < open
-
-//------------------------------------------------------------------------------
-// DISPLACEMENT + FVG/IFVG ENGINE
-//------------------------------------------------------------------------------
-bullDisplacement = enableDisplacement and bodyRatio >= displacementBodyRatio and close > open and relativeVolume > 1.2
-bearDisplacement = enableDisplacement and bodyRatio >= displacementBodyRatio and close < open and relativeVolume > 1.2
-
-var array<box> fvgBoxes = array.new_box()
-var array<int> fvgDirs = array.new_int() // 1 bull, -1 bear
-
-f_addFvg(float top, float bottom, int dir, color fillColor) =>
-    b = box.new(bar_index - 2, top, bar_index, bottom, bgcolor = fillColor, border_color = color.new(fillColor, 0))
-    box.set_extend(b, extend.right)
-    f_pushBox(fvgBoxes, fvgDirs, b, dir, maxZoneBoxes)
-
-newBullFvg = enableFvg and low > high[2]
-newBearFvg = enableFvg and high < low[2]
-
-if newBullFvg and showZones
-    f_addFvg(low, high[2], 1, color.new(color.green, 82))
-if newBearFvg and showZones
-    f_addFvg(low[2], high, -1, color.new(color.red, 82))
-
-bullIfvg = false
-bearIfvg = false
-if (enableFvg or enableIfvg) and array.size(fvgBoxes) > 0
-    for i = array.size(fvgBoxes) - 1 to 0
-        b = array.get(fvgBoxes, i)
-        dir = array.get(fvgDirs, i)
-        top = box.get_top(b)
-        bottom = box.get_bottom(b)
-        filled = (dir == 1 and low <= bottom) or (dir == -1 and high >= top)
-        if filled
-            if enableIfvg
-                bullIfvg := bullIfvg or (dir == -1 and close > top)
-                bearIfvg := bearIfvg or (dir == 1 and close < bottom)
-            box.delete(b)
-            array.remove(fvgBoxes, i)
-            array.remove(fvgDirs, i)
-
-//------------------------------------------------------------------------------
-// ORDER BLOCK + BREAKER ENGINE (bounded)
-//------------------------------------------------------------------------------
-var array<box> obBoxes = array.new_box()
-var array<int> obDirs = array.new_int()  // 1 bull, -1 bear
-newBullOb = false
-newBearOb = false
-
-f_findLastCandle(bool bullishSearch, int lookback) =>
-    int idx = na
-    for i = 1 to lookback
-        cond = bullishSearch ? close[i] < open[i] : close[i] > open[i]
-        if cond and na(idx)
-            idx := i
-    idx
-
-f_addOb(int idx, int dir) =>
-    top = dir == 1 ? open[idx] : high[idx]
-    bot = dir == 1 ? low[idx] : open[idx]
-    fill = dir == 1 ? color.new(color.teal, 83) : color.new(color.orange, 83)
-    b = box.new(bar_index - idx, top, bar_index, bot, bgcolor = fill, border_color = color.new(fill, 0))
-    box.set_extend(b, extend.right)
-    f_pushBox(obBoxes, obDirs, b, dir, maxZoneBoxes)
-
-if enableOrderBlocks and bullBos and showZones
-    obIdx = f_findLastCandle(true, obLookback)
-    if not na(obIdx)
-        f_addOb(int(obIdx), 1)
-        newBullOb := true
-if enableOrderBlocks and bearBos and showZones
-    obIdx = f_findLastCandle(false, obLookback)
-    if not na(obIdx)
-        f_addOb(int(obIdx), -1)
-        newBearOb := true
-
-bullBreaker = false
-bearBreaker = false
-if (enableOrderBlocks or enableBreakerBlocks) and array.size(obBoxes) > 0
-    for i = array.size(obBoxes) - 1 to 0
-        b = array.get(obBoxes, i)
-        dir = array.get(obDirs, i)
-        top = box.get_top(b)
-        bot = box.get_bottom(b)
-        invalidated = (dir == 1 and close < bot) or (dir == -1 and close > top)
-        if invalidated
-            bullBreaker := bullBreaker or (dir == -1)
-            bearBreaker := bearBreaker or (dir == 1)
-            if enableBreakerBlocks
-                box.set_bgcolor(b, dir == 1 ? color.new(color.red, 80) : color.new(color.green, 80))
-                box.set_border_color(b, color.new(color.yellow, 20))
-            else
-                box.delete(b)
-                array.remove(obBoxes, i)
-                array.remove(obDirs, i)
-
-//------------------------------------------------------------------------------
-// PREMIUM/DISCOUNT + DEALER RANGE
-//------------------------------------------------------------------------------
-rangeHigh = lastMajorHigh
-rangeLow = lastMajorLow
-rangeSize = rangeHigh - rangeLow
-rangePos = not na(rangeSize) and rangeSize > 0 ? f_safeDiv(close - rangeLow, rangeSize) : na
-equilibrium = not na(rangeSize) ? rangeLow + rangeSize * 0.5 : na
-premiumLevel = not na(rangeSize) ? rangeLow + rangeSize * premiumBoundaryPct : na
-discountLevel = not na(rangeSize) ? rangeLow + rangeSize * discountBoundaryPct : na
-pdState = na(rangePos) ? "UNAVAILABLE" : rangePos > premiumBoundaryPct ? "PREMIUM" : rangePos < discountBoundaryPct ? "DISCOUNT" : "EQUILIBRIUM"
-
-dealerHigh = ta.highest(high, dealerLength)
-dealerLow = ta.lowest(low, dealerLength)
-dealerMid = (dealerHigh + dealerLow) * 0.5
-inPremiumDealer = close > dealerMid
-
-//------------------------------------------------------------------------------
-// VWAP ENGINE
-//------------------------------------------------------------------------------
-vwap = enableVwap ? ta.vwap(vwapSource) : na
-vwapDev = ta.stdev(vwapSource, volLength)
-vwapUpper = vwap + vwapDev * vwapBandMult
-vwapLower = vwap - vwapDev * vwapBandMult
-vwapReclaim = enableVwap and ta.crossover(close, vwap)
-vwapLoss = enableVwap and ta.crossunder(close, vwap)
-
-//------------------------------------------------------------------------------
-// VOLUME PROFILE APPROXIMATION (bounded rolling bins)
-//------------------------------------------------------------------------------
-var array<float> vpBins = array.new_float()
-if array.size(vpBins) != vpBinsCount
-    array.clear(vpBins)
-    for i = 0 to vpBinsCount - 1
-        array.push(vpBins, 0.0)
-
-profileHi = ta.highest(high, vpLookback)
-profileLo = ta.lowest(low, vpLookback)
-profileRange = math.max(profileHi - profileLo, syminfo.mintick)
-if enableProfile
-    for i = 0 to vpBinsCount - 1
-        decayed = array.get(vpBins, i) * (1.0 - vpDecay)
-        array.set(vpBins, i, decayed)
-    pos = f_clamp(f_safeDiv(hlc3 - profileLo, profileRange), 0.0, 0.9999)
-    idx = int(math.floor(pos * vpBinsCount))
-    currentBin = array.get(vpBins, idx)
-    array.set(vpBins, idx, currentBin + volume)
-
-pocIndex = 0
-pocValue = 0.0
-if enableProfile
-    for i = 0 to vpBinsCount - 1
-        v = array.get(vpBins, i)
-        if v > pocValue
-            pocValue := v
-            pocIndex := i
-
-pocPrice = profileLo + (float(pocIndex) + 0.5) * profileRange / vpBinsCount
-pocMigrUp = enableProfile and not na(pocPrice[1]) and pocPrice > pocPrice[1] + syminfo.mintick
-pocMigrDown = enableProfile and not na(pocPrice[1]) and pocPrice < pocPrice[1] - syminfo.mintick
-
-//------------------------------------------------------------------------------
-// SESSION ENGINE
-//------------------------------------------------------------------------------
-asiaActive = enableSession and not na(time(timeframe.period, sessionAsia))
-londonActive = enableSession and not na(time(timeframe.period, sessionLondon))
-newYorkActive = enableSession and not na(time(timeframe.period, sessionNewYork))
-
-sessionName = asiaActive ? "ASIA" : londonActive ? "LONDON" : newYorkActive ? "NEW YORK" : "OFF SESSION"
-
-var float currentSessionOpen = na
-sessionStarted = (asiaActive and not asiaActive[1]) or (londonActive and not londonActive[1]) or (newYorkActive and not newYorkActive[1])
-if sessionStarted
-    currentSessionOpen := open
-if not asiaActive and not londonActive and not newYorkActive
-    currentSessionOpen := na
-
-sessionBias = na(currentSessionOpen) ? "N/A" : close > currentSessionOpen ? "BULLISH" : close < currentSessionOpen ? "BEARISH" : "NEUTRAL"
-
-//------------------------------------------------------------------------------
-// SMT / INTERMARKET DIVERGENCE (confirmed pivots)
-//------------------------------------------------------------------------------
-peerHigh = request.security(smtSymbol, timeframe.period, high, lookahead = barmerge.lookahead_off)
-peerLow = request.security(smtSymbol, timeframe.period, low, lookahead = barmerge.lookahead_off)
-peerPivotHigh = request.security(smtSymbol, timeframe.period, ta.pivothigh(high, smtPivotLen, smtPivotLen), lookahead = barmerge.lookahead_off)
-peerPivotLow = request.security(smtSymbol, timeframe.period, ta.pivotlow(low, smtPivotLen, smtPivotLen), lookahead = barmerge.lookahead_off)
-
-priceSmtHigh = ta.pivothigh(high, smtPivotLen, smtPivotLen)
-priceSmtLow = ta.pivotlow(low, smtPivotLen, smtPivotLen)
-
-var float prevPriceSmtHigh = na
-var float prevPriceSmtLow = na
-var float prevPeerSmtHigh = na
-var float prevPeerSmtLow = na
-
-bullSmtDiv = false
-bearSmtDiv = false
-if enableSMT
-    if not na(priceSmtHigh) and not na(peerPivotHigh)
-        bearSmtDiv := not na(prevPriceSmtHigh) and not na(prevPeerSmtHigh) and priceSmtHigh > prevPriceSmtHigh and peerPivotHigh <= prevPeerSmtHigh
-        prevPriceSmtHigh := priceSmtHigh
-        prevPeerSmtHigh := peerPivotHigh
-    if not na(priceSmtLow) and not na(peerPivotLow)
-        bullSmtDiv := not na(prevPriceSmtLow) and not na(prevPeerSmtLow) and priceSmtLow < prevPriceSmtLow and peerPivotLow >= prevPeerSmtLow
-        prevPriceSmtLow := priceSmtLow
-        prevPeerSmtLow := peerPivotLow
-
-//------------------------------------------------------------------------------
-// NON-REPAINTING MTF CONTEXT
-//------------------------------------------------------------------------------
-htfCloseConfirmed = request.security(syminfo.tickerid, htfTf, close[1], lookahead = barmerge.lookahead_off)
-htfEmaConfirmed = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLength)[1], lookahead = barmerge.lookahead_off)
-htfBull = enableMTF and htfCloseConfirmed > htfEmaConfirmed
-htfBear = enableMTF and htfCloseConfirmed < htfEmaConfirmed
-htfState = not enableMTF ? "DISABLED" : htfBull ? "HTF BULL" : htfBear ? "HTF BEAR" : "HTF NEUTRAL"
-
-//------------------------------------------------------------------------------
-// MARKET REGIME + WEIGHTED CONFLUENCE + ENTRY/EVENT SEQUENCE
-//------------------------------------------------------------------------------
-emaFast = ta.ema(close, 20)
-emaSlow = ta.ema(close, 50)
-trendStrength = f_safeDiv(math.abs(emaFast - emaSlow), math.max(atr, syminfo.mintick))
-atrPct = f_safeDiv(atr, close)
-regimeState = not enableRegime ? "DISABLED" : trendStrength >= regimeTrendThreshold ? (atrPct >= regimeVolatilityThreshold ? "TRENDING + HIGH VOL" : "TRENDING") : "RANGING"
-
-bullStructureCond = majorTrend > 0
-bearStructureCond = majorTrend < 0
-bullSweepCond = bullSweepReversal
-bearSweepCond = bearSweepReversal
-bullFlowCond = estimatedDelta > 0
-bearFlowCond = estimatedDelta < 0
-bullCvdCond = cvd > cvdMa
-bearCvdCond = cvd < cvdMa
-bullVwapCond = close > vwap
-bearVwapCond = close < vwap
-bullPdCond = pdState == "DISCOUNT" or not inPremiumDealer
-bearPdCond = pdState == "PREMIUM" or inPremiumDealer
-bullMtfCond = htfBull
-bearMtfCond = htfBear
-
-maxWeight = math.max(weightStructure + weightSweep + weightFlow + weightCvd + weightVwap + weightPd + weightMTF, 1.0)
-bullScoreRaw = weightStructure * f_boolToFloat(bullStructureCond) + weightSweep * f_boolToFloat(bullSweepCond) + weightFlow * f_boolToFloat(bullFlowCond) + weightCvd * f_boolToFloat(bullCvdCond) + weightVwap * f_boolToFloat(bullVwapCond) + weightPd * f_boolToFloat(bullPdCond) + weightMTF * f_boolToFloat(bullMtfCond)
-bearScoreRaw = weightStructure * f_boolToFloat(bearStructureCond) + weightSweep * f_boolToFloat(bearSweepCond) + weightFlow * f_boolToFloat(bearFlowCond) + weightCvd * f_boolToFloat(bearCvdCond) + weightVwap * f_boolToFloat(bearVwapCond) + weightPd * f_boolToFloat(bearPdCond) + weightMTF * f_boolToFloat(bearMtfCond)
-
-bullConfluence = enableConfluence ? bullScoreRaw * 100.0 / maxWeight : 0.0
-bearConfluence = enableConfluence ? bearScoreRaw * 100.0 / maxWeight : 0.0
-signalQuality = math.max(bullConfluence, bearConfluence)
-confluenceBullReady = enableConfluence and bullConfluence >= confluenceThreshold
-confluenceBearReady = enableConfluence and bearConfluence >= confluenceThreshold
-
-var int longStage = 0
-var int shortStage = 0
-if enableSequence
-    if sweepLow
-        longStage := 1
-    if longStage >= 1 and bullBos
-        longStage := 2
-    if longStage >= 2 and confluenceBullReady
-        longStage := 3
-    if bearBos
-        longStage := 0
-
-    if sweepHigh
-        shortStage := 1
-    if shortStage >= 1 and bearBos
-        shortStage := 2
-    if shortStage >= 2 and confluenceBearReady
-        shortStage := 3
-    if bullBos
-        shortStage := 0
-
-setupState = longStage == 3 ? "LONG SETUP READY" : shortStage == 3 ? "SHORT SETUP READY" : longStage == 2 ? "LONG BUILD" : shortStage == 2 ? "SHORT BUILD" : longStage == 1 ? "LONG SWEEP" : shortStage == 1 ? "SHORT SWEEP" : "NEUTRAL"
-setupChanged = setupState != setupState[1]
-
-//------------------------------------------------------------------------------
-// VISUALS
-//------------------------------------------------------------------------------
-plot(enableVwap ? vwap : na, "Session VWAP", color = color.new(color.aqua, 0), linewidth = 2)
-plot(enableVwap and showVwapBands ? vwapUpper : na, "VWAP upper", color = color.new(color.aqua, 65))
-plot(enableVwap and showVwapBands ? vwapLower : na, "VWAP lower", color = color.new(color.aqua, 65))
-plot(enablePd ? equilibrium : na, "Equilibrium", color = color.new(color.gray, 60), style = plot.style_linebr)
-plot(enablePd ? dealerMid : na, "Dealer mid", color = color.new(color.yellow, 70), style = plot.style_line)
-plot(enableProfile ? pocPrice : na, "Estimated POC", color = color.new(color.fuchsia, 20), linewidth = 2)
-
-plotshape(enableVisuals and showSignalMarks and showStructureLabels and majorHH, title = "Major HH", style = shape.labeldown, location = location.abovebar, offset = -majorLen, text = "HH", color = color.new(color.green, 20), textcolor = color.white, size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and showStructureLabels and majorLH, title = "Major LH", style = shape.labeldown, location = location.abovebar, offset = -majorLen, text = "LH", color = color.new(color.orange, 20), textcolor = color.white, size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and showStructureLabels and majorHL, title = "Major HL", style = shape.labelup, location = location.belowbar, offset = -majorLen, text = "HL", color = color.new(color.green, 20), textcolor = color.white, size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and showStructureLabels and majorLL, title = "Major LL", style = shape.labelup, location = location.belowbar, offset = -majorLen, text = "LL", color = color.new(color.red, 20), textcolor = color.white, size = size.tiny)
-
-plotshape(enableVisuals and showSignalMarks and bullBos, title = "Bull BOS", style = shape.triangleup, location = location.belowbar, color = color.green, size = size.tiny, text = "BOS")
-plotshape(enableVisuals and showSignalMarks and bearBos, title = "Bear BOS", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.tiny, text = "BOS")
-plotshape(enableVisuals and showSignalMarks and bullChoch, title = "Bull CHoCH", style = shape.labelup, location = location.belowbar, color = color.teal, text = "CH")
-plotshape(enableVisuals and showSignalMarks and bearChoch, title = "Bear CHoCH", style = shape.labeldown, location = location.abovebar, color = color.maroon, text = "CH")
-plotshape(enableVisuals and showSignalMarks and bullMss, title = "Bull MSS", style = shape.labelup, location = location.belowbar, color = color.new(color.blue, 0), text = "MSS")
-plotshape(enableVisuals and showSignalMarks and bearMss, title = "Bear MSS", style = shape.labeldown, location = location.abovebar, color = color.new(color.purple, 0), text = "MSS")
-plotshape(enableVisuals and showSignalMarks and sweepLow, title = "Sweep Low", style = shape.circle, location = location.belowbar, color = color.new(color.lime, 0), size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and sweepHigh, title = "Sweep High", style = shape.circle, location = location.abovebar, color = color.new(color.yellow, 0), size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and bullCvdDiv, title = "Bull CVD divergence", style = shape.triangleup, location = location.belowbar, color = color.new(color.blue, 0), size = size.tiny, text = "CVD+")
-plotshape(enableVisuals and showSignalMarks and bearCvdDiv, title = "Bear CVD divergence", style = shape.triangledown, location = location.abovebar, color = color.new(color.purple, 0), size = size.tiny, text = "CVD-")
-plotshape(enableVisuals and showSignalMarks and bullSmtDiv, title = "Bull SMT divergence", style = shape.triangleup, location = location.belowbar, color = color.new(color.navy, 0), size = size.tiny, text = "SMT+")
-plotshape(enableVisuals and showSignalMarks and bearSmtDiv, title = "Bear SMT divergence", style = shape.triangledown, location = location.abovebar, color = color.new(color.fuchsia, 0), size = size.tiny, text = "SMT-")
-plotshape(enableVisuals and showSignalMarks and bullDisplacement, title = "Bull displacement", style = shape.arrowup, location = location.belowbar, color = color.new(color.green, 0), size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and bearDisplacement, title = "Bear displacement", style = shape.arrowdown, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and newBullOb, title = "New Bull OB", style = shape.square, location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and newBearOb, title = "New Bear OB", style = shape.square, location = location.abovebar, color = color.new(color.orange, 0), size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and vwapReclaim, title = "VWAP reclaim", style = shape.circle, location = location.belowbar, color = color.aqua, size = size.tiny)
-plotshape(enableVisuals and showSignalMarks and vwapLoss, title = "VWAP loss", style = shape.circle, location = location.abovebar, color = color.fuchsia, size = size.tiny)
-
-barTint = confluenceBullReady ? color.new(color.green, 55) : confluenceBearReady ? color.new(color.red, 55) : enableOrderFlow ? (estimatedDelta > 0 ? color.new(color.green, 80) : color.new(color.red, 80)) : na
-barcolor(enableVisuals ? barTint : na)
-
-var array<label> eventLabels = array.new_label()
-f_markEvent(eventLabels, bullAbsorption, "ABS+", false, color.new(color.green, 0), maxEventLabels)
-f_markEvent(eventLabels, bearAbsorption, "ABS-", true, color.new(color.red, 0), maxEventLabels)
-f_markEvent(eventLabels, bullExhaustion, "EXH+", true, color.new(color.blue, 0), maxEventLabels)
-f_markEvent(eventLabels, bearExhaustion, "EXH-", false, color.new(color.orange, 0), maxEventLabels)
-f_markEvent(eventLabels, bullBreaker and enableBreakerBlocks, "BRK+", false, color.new(color.teal, 0), maxEventLabels)
-f_markEvent(eventLabels, bearBreaker and enableBreakerBlocks, "BRK-", true, color.new(color.maroon, 0), maxEventLabels)
-
-//------------------------------------------------------------------------------
-// DASHBOARD
-//------------------------------------------------------------------------------
-var table dashboard = table.new(dashboardPosition == "Top left" ? position.top_left : dashboardPosition == "Bottom left" ? position.bottom_left : dashboardPosition == "Bottom right" ? position.bottom_right : position.top_right, 2, 19, border_width = 1)
-if barstate.islast and enableDashboard
-    table.clear(dashboard, 0, 0, 1, 18)
-    r = 0
-    table.cell(dashboard, 0, r, "SMC OFIE / " + mode, text_color = color.white, bgcolor = color.rgb(23, 33, 48))
-    table.cell(dashboard, 1, r, "FULL ENGINE", text_color = color.yellow, bgcolor = color.rgb(23, 33, 48))
-    r += 1
-    table.cell(dashboard, 0, r, "Market structure", text_color = color.gray)
-    table.cell(dashboard, 1, r, structureState, text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Liquidity model", text_color = color.gray)
-    table.cell(dashboard, 1, r, liquidityBehavior, text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Estimated delta", text_color = color.gray)
-    table.cell(dashboard, 1, r, str.tostring(estimatedDeltaPct, "#.##") + "%", text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "CVD regime", text_color = color.gray)
-    table.cell(dashboard, 1, r, cvdRegime, text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Footprint imbalance", text_color = color.gray)
-    table.cell(dashboard, 1, r, str.tostring(footprintImbalance, "#.##") + "x", text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "PD state", text_color = color.gray)
-    table.cell(dashboard, 1, r, pdState, text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Session", text_color = color.gray)
-    table.cell(dashboard, 1, r, sessionName + " / " + sessionBias, text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "VWAP", text_color = color.gray)
-    table.cell(dashboard, 1, r, enableVwap ? (close > vwap ? "ABOVE" : "BELOW") : "DISABLED", text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Est. POC", text_color = color.gray)
-    table.cell(dashboard, 1, r, enableProfile ? str.tostring(pocPrice, "#.#####") : "DISABLED", text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "SMT", text_color = color.gray)
-    table.cell(dashboard, 1, r, bullSmtDiv ? "BULL DIV" : bearSmtDiv ? "BEAR DIV" : "NONE", text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "HTF context", text_color = color.gray)
-    table.cell(dashboard, 1, r, htfState, text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Regime", text_color = color.gray)
-    table.cell(dashboard, 1, r, regimeState, text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Confluence", text_color = color.gray)
-    table.cell(dashboard, 1, r, "B " + str.tostring(bullConfluence, "#.0") + " / S " + str.tostring(bearConfluence, "#.0"), text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Signal quality", text_color = color.gray)
-    table.cell(dashboard, 1, r, str.tostring(signalQuality, "#.0"), text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Setup stage", text_color = color.gray)
-    table.cell(dashboard, 1, r, setupState, text_color = color.white)
-    r += 1
-    table.cell(dashboard, 0, r, "Data honesty", text_color = color.gray)
-    table.cell(dashboard, 1, r, "No true DOM/bid-ask", text_color = color.orange)
-
-//------------------------------------------------------------------------------
-// ALERTS (implemented and bar-close safe conditions only)
-//------------------------------------------------------------------------------
-alertGate = enableAlerts and (alertsBarCloseOnly ? barstate.isconfirmed : true)
-
-alertcondition(alertGate and bullBos, "Bullish BOS", "Confirmed bullish BOS in SMC OFIE")
-alertcondition(alertGate and bearBos, "Bearish BOS", "Confirmed bearish BOS in SMC OFIE")
-alertcondition(alertGate and bullChoch, "Bullish CHoCH", "Confirmed bullish CHoCH in SMC OFIE")
-alertcondition(alertGate and bearChoch, "Bearish CHoCH", "Confirmed bearish CHoCH in SMC OFIE")
-alertcondition(alertGate and bullMss, "Bullish MSS", "Confirmed bullish MSS in SMC OFIE")
-alertcondition(alertGate and bearMss, "Bearish MSS", "Confirmed bearish MSS in SMC OFIE")
-alertcondition(alertGate and sweepLow, "Liquidity Sweep Low", "Confirmed sell-side liquidity sweep (low)")
-alertcondition(alertGate and sweepHigh, "Liquidity Sweep High", "Confirmed buy-side liquidity sweep (high)")
-alertcondition(alertGate and bullSweepReversal, "Bullish Sweep Behavior", "Bullish sweep reversal confirmation")
-alertcondition(alertGate and bearSweepReversal, "Bearish Sweep Behavior", "Bearish sweep reversal confirmation")
-alertcondition(alertGate and bullCvdDiv, "Bullish CVD Divergence", "Confirmed bullish CVD divergence")
-alertcondition(alertGate and bearCvdDiv, "Bearish CVD Divergence", "Confirmed bearish CVD divergence")
-alertcondition(alertGate and bullSmtDiv, "Bullish SMT Divergence", "Confirmed bullish SMT divergence")
-alertcondition(alertGate and bearSmtDiv, "Bearish SMT Divergence", "Confirmed bearish SMT divergence")
-alertcondition(alertGate and newBullFvg, "Bullish FVG", "New bullish fair value gap detected")
-alertcondition(alertGate and newBearFvg, "Bearish FVG", "New bearish fair value gap detected")
-alertcondition(alertGate and bullIfvg, "Bullish IFVG", "Bullish inverse FVG condition")
-alertcondition(alertGate and bearIfvg, "Bearish IFVG", "Bearish inverse FVG condition")
-alertcondition(alertGate and bullAbsorption, "Bullish Absorption", "OHLCV footprint approximation: bullish absorption")
-alertcondition(alertGate and bearAbsorption, "Bearish Absorption", "OHLCV footprint approximation: bearish absorption")
-alertcondition(alertGate and bullExhaustion, "Bullish Exhaustion", "OHLCV footprint approximation: bullish exhaustion")
-alertcondition(alertGate and bearExhaustion, "Bearish Exhaustion", "OHLCV footprint approximation: bearish exhaustion")
-alertcondition(alertGate and bullDisplacement, "Bullish Displacement", "Bullish displacement bar")
-alertcondition(alertGate and bearDisplacement, "Bearish Displacement", "Bearish displacement bar")
-alertcondition(alertGate and newBullOb, "Bullish Order Block", "New bullish order block formed")
-alertcondition(alertGate and newBearOb, "Bearish Order Block", "New bearish order block formed")
-alertcondition(alertGate and bullBreaker and enableBreakerBlocks, "Bullish Breaker", "Bullish breaker block condition")
-alertcondition(alertGate and bearBreaker and enableBreakerBlocks, "Bearish Breaker", "Bearish breaker block condition")
-alertcondition(alertGate and vwapReclaim, "VWAP Reclaim", "Price reclaimed VWAP")
-alertcondition(alertGate and vwapLoss, "VWAP Loss", "Price lost VWAP")
-alertcondition(alertGate and pocMigrUp, "POC Migration Up", "Estimated profile POC migrated up")
-alertcondition(alertGate and pocMigrDown, "POC Migration Down", "Estimated profile POC migrated down")
-alertcondition(alertGate and confluenceBullReady, "Bullish Confluence", "Bullish confluence threshold reached")
-alertcondition(alertGate and confluenceBearReady, "Bearish Confluence", "Bearish confluence threshold reached")
-alertcondition(alertGate and setupChanged, "Setup Stage Change", "Setup sequence stage changed")
+// Current open-bar values can change until bar close.
+// Pine cannot open multiple independent panes from one script. Duplicate this
+// script or split it into multiple scripts if you need separate panels.
